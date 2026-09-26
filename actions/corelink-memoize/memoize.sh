@@ -3,22 +3,14 @@ set +e
 
 required_miss=78
 policy="${CL_CACHE_POLICY:-optional}"
+verified_clw=""
 case "$policy" in
   optional) ;;
   required-hit)
-    # The required-hit wire contract is prepared for clw 0.1.12. Refuse every
-    # other, missing, or malformed installation before the wrapped command can
-    # start; version output is the only capability check (never parse HIT text).
-    if ! command -v clw >/dev/null 2>&1; then
-      echo "::error title=corelink-memoize::required-hit requires clw 0.1.12" >&2
-      exit "$required_miss"
-    fi
-    if ! clw_version="$(clw --version 2>/dev/null)"; then
-      echo "::error title=corelink-memoize::required-hit requires clw 0.1.12" >&2
-      exit "$required_miss"
-    fi
-    if [ "$clw_version" != "clw 0.1.12" ]; then
-      echo "::error title=corelink-memoize::required-hit requires clw 0.1.12" >&2
+    verifier="${GITHUB_ACTION_PATH:-$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)}/verify-required-hit.py"
+    if ! verified_clw="$(python3 "$verifier" \
+      "${CL_REQUIRED_HIT_MANIFEST:-}" "${CL_REQUIRED_HIT_SIGNATURE:-}" 2>&1)"; then
+      echo "::error title=corelink-memoize::required-hit candidate proof rejected: ${verified_clw:-verification failed}" >&2
       exit "$required_miss"
     fi
     ;;
@@ -68,7 +60,7 @@ if [ -n "${CLW_ENDPOINT:-}" ] && { [ -n "${CLW_TOKEN:-}" ] || [ -n "${CLW_CRED_T
   echo "corelink-memoize: moat present — memoizing via clw run"
   echo "corelink-memoize[env-0-check]: CLW_REF_DOMAIN=[${CLW_REF_DOMAIN:-}] CLW_CRED_TICKET_len=[${#CLW_CRED_TICKET}] CLW_LEASE_ID=[${CLW_LEASE_ID:-}] CLW_FABRIC_ENDPOINT_set=[$([ -n "${CLW_FABRIC_ENDPOINT:-}" ] && echo yes || echo no)] CLW_TOKEN_set=[$([ -n "${CLW_TOKEN:-}" ] && echo yes || echo no)]"
   if [ "$policy" = required-hit ]; then
-    clw run --require-hit "${input_args[@]}" "${env_args[@]}" -- bash -c "$CL_RUN"
+    "$verified_clw" run --require-hit "${input_args[@]}" "${env_args[@]}" -- bash -c "$CL_RUN"
     exit "$?"
   else
     state_dir="$(mktemp -d "${RUNNER_TEMP:-${TMPDIR:-/tmp}}/corelink-memoize-state.XXXXXX")" || {
@@ -99,7 +91,7 @@ if [ -n "${CLW_ENDPOINT:-}" ] && { [ -n "${CLW_TOKEN:-}" ] || [ -n "${CLW_CRED_T
   fi
 else
   if [ "$policy" = required-hit ]; then
-    echo "::error title=corelink-memoize::required-hit requires the CLW moat and clw 0.1.12" >&2
+    echo "::error title=corelink-memoize::required-hit requires the CLW moat and a verified required-hit/v1 candidate" >&2
     exit "$required_miss"
   fi
   echo "corelink-memoize: moat absent (no CLW_*/clw) — COLD run"

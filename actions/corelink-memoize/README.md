@@ -11,6 +11,14 @@ its keep). Measured on the dogfood runner: a ~10.8 s `cargo build` re-run drops 
 command gets one cold fallback. A missing, malformed, `DISPATCHING`, or
 `EXECUTED` receipt never authorizes a retry; a child's exit 125 is preserved.
 
+**Required-hit mode:** this is a separate fail-closed policy. It requires a
+centrally signed candidate manifest and detached SSH signature, verifies the
+manifest's capability, provenance, supported target, and SHA-256 of the exact
+resolved `clw` executable before dispatch, then calls `clw run --require-hit`.
+Missing or invalid proof, an unsupported capability/target, a version mismatch,
+or an unavailable moat returns 78 without launching the wrapped command. The
+package version alone is never capability proof.
+
 ## Usage
 
 Runs on a **CoreLink ephemeral runner** (`runs-on: corelink-dogfood` / your
@@ -57,6 +65,23 @@ cannot authorize a cold retry after a failed memoized invocation.
 | `inputs` | no       | `.`     | space/newline-separated paths forming the cache key (repeated `--input`) |
 | `env`    | no       | `""`    | space-separated env var NAMES folded into the key (repeated `--env`) |
 | `tool`   | no       | `""`    | toolchains whose VERSION is auto-folded into the key (`rust`·`node`·`python`·`go`) so an upgrade busts the cache |
+| `cache-policy` | no | `optional` | `optional` preserves the #567 fallback protocol; `required-hit` requires signed candidate proof before dispatch |
+| `required-hit-manifest` | no | `""` | Local path to the signed candidate JSON; required for `required-hit`, ignored for `optional` |
+| `required-hit-signature` | no | `""` | Local path to the detached SSH signature over the exact manifest bytes; required for `required-hit`, ignored for `optional` |
+
+The required-hit manifest schema is version 1 and binds the canonical
+`HuGR-dev/corelink-workspaces` repository identity, source SHA, package version,
+`required-hit/v1` capability, binary name and target, binary SHA-256, and
+candidate workflow run ID/attempt. The detached signature is checked with the
+pinned `corelink-release-candidate` principal in the
+`corelink-clw-candidate` namespace. This candidate trust is not a release or
+production activation mechanism.
+
+The verifier uses the Python 3 standard library and OpenSSH `ssh-keygen` for
+signature validation. The current pinned CoreLink runner image installs
+`python3` but does not explicitly install `openssh-client`; required-hit will
+fail closed there until that runtime dependency is separately approved and
+provided. Do not treat this candidate Action change as production activation.
 
 ## Notes
 

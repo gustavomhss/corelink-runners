@@ -5,8 +5,9 @@ description: >-
   `optional` policy runs COLD if the moat is absent; after an internal error it
   retries once only with a proven NOT_STARTED receipt. Ambiguous state never retries.
   `required-hit` is fail-closed and requires
-  the exact clw 0.1.12 verified no-exec HIT API; absent, older, or unknown clw
-  returns exit 78. Use on a CoreLink ephemeral runner.
+  a signed clw candidate manifest declaring required-hit/v1 and matching the
+  resolved binary digest; absent, invalid, unsupported, or mismatched proof
+  returns exit 78 before child dispatch. Use on a CoreLink ephemeral runner.
 
 inputs:
   run:
@@ -36,10 +37,19 @@ inputs:
     description: >-
       Cache availability policy: `optional` (default; absent moat runs COLD and a failed clw call
       falls back only with a proven NOT_STARTED receipt) or
-      `required-hit` (requires the exact clw 0.1.12 verified no-exec HIT
-      contract; unavailable, older, or unknown clw returns exit 78).
+      `required-hit` (requires a centrally signed candidate manifest with the
+      required-hit/v1 capability and matching resolved binary digest; invalid
+      or unavailable proof returns exit 78 before child dispatch).
     required: false
     default: "optional"
+  required-hit-manifest:
+    description: "Path to the centrally signed required-hit candidate manifest; required only for cache-policy required-hit."
+    required: false
+    default: ""
+  required-hit-signature:
+    description: "Path to the detached SSH signature over required-hit-manifest; required only for cache-policy required-hit."
+    required: false
+    default: ""
 
 runs:
   using: "composite"
@@ -51,5 +61,7 @@ runs:
         CL_ENVNAMES: ${{ inputs.env }}
         CL_TOOLS: ${{ inputs.tool }}
         CL_CACHE_POLICY: ${{ inputs.cache-policy }}
+        CL_REQUIRED_HIT_MANIFEST: ${{ inputs.required-hit-manifest }}
+        CL_REQUIRED_HIT_SIGNATURE: ${{ inputs.required-hit-signature }}
       run: |
         "${GITHUB_ACTION_PATH}/memoize.sh"
