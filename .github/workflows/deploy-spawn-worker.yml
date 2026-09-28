@@ -82,7 +82,12 @@ on:
         # report its verdict; the script enforces that bound.
         default: "2700"
       force:
-        description: "DANGEROUS: skip the wait and roll over runners that are executing customer jobs. REQUIRED for the first deploy that ships /internal/v1/fleet/busy (see BOOTSTRAP in the header)."
+        description: "DANGEROUS: skip the wait and roll over runners that are executing customer jobs. Never use with hosted_bootstrap."
+        required: false
+        type: boolean
+        default: false
+      hosted_bootstrap:
+        description: "Use GitHub-hosted Ubuntu for the test and deploy jobs when no corelink runner is available. Main-only; deployment approval is required."
         required: false
         type: boolean
         default: false
@@ -92,18 +97,18 @@ permissions:
 
 jobs:
   # Gate: the spawn-Worker's own test suite must pass before we deploy it.
-  # Self-hosted `corelink` (zero-hosted mandate): the hosted ubuntu-latest lane is
-  # dead under the billing block. Node 22 is baked into the runner image + on PATH,
-  # so no actions/setup-node is needed; checkout resolves from the baked
-  # action-archive cache (0 codeload).
-  test:
+  # Self-hosted `corelink` remains the default. The explicit hosted_bootstrap
+  # dispatch input is an approval-gated recovery path for an empty CoreLink
+  # runner inventory; it uses the standard GitHub-hosted Ubuntu image.
+  test-corelink:
+    if: ${{ !inputs.hosted_bootstrap }}
     runs-on: corelink
     timeout-minutes: 15
     defaults:
       run:
         working-directory: deploy/cloudflare
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4 (CoreLink cache)
 
       - name: Install deps
         run: npm ci
@@ -114,15 +119,35 @@ jobs:
       - name: Test (vitest)
         run: npm run test
 
-  deploy:
-    needs: test
+  test-hosted:
+    if: ${{ inputs.hosted_bootstrap }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    defaults:
+      run:
+        working-directory: deploy/cloudflare
+    steps:
+      - uses: actions/checkout@9f698171ed81b15d1823a05fc7211befd50c8ae0 # v6.0.3 (Node 24)
+
+      - name: Set up Node 22 for hosted bootstrap
+        uses: actions/setup-node@2028fbc5c25fe9cf00d9f06a71cc4710d4507903 # v6.0.0 (Node 24)
+        with:
+          node-version: '22'
+
+      - name: Install deps
+        run: npm ci
+
+      - name: Typecheck
+        run: npm run typecheck
+
+      - name: Test (vitest)
+        run: npm run test
+
+  deploy-corelink:
+    needs: test-corelink
+    if: ${{ github.ref == 'refs/heads/main' && !inputs.hosted_bootstrap }}
     runs-on: corelink
-    permissions:
-      # `administration: read` used to be here for the busy-fleet gate. It is gone
-      # on purpose: the gate asks the spawn-Worker now, so it needs NO GitHub
-      # permission — and the permission was never sufficient anyway (it is
-      # this-repo-only, while the fleet spans every repo in RECONCILER_REPOS).
-      contents: read
+    environment: corelink-runners
     # Must outlast `deadline_secs` (default 2700s = 45 min) so a still-busy fleet
     # produces the gate's explicit verdict rather than a bare "cancelled".
     timeout-minutes: 60
@@ -147,7 +172,7 @@ jobs:
             exit 1
           fi
 
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4 (CoreLink cache)
 
       - name: Install deps (wrangler)
         run: npm ci
@@ -169,6 +194,70 @@ jobs:
           # THIS job is itself running on a fabric box, which GitHub correctly
           # reports as busy. Without excluding it the gate waits on itself until
           # the deadline, every single time.
+          EXCLUDE_RUNNERS: ${{ runner.name }}
+        run: bash scripts/ci/wait-for-idle-fleet.sh
+
+      - name: Guard — reject Option-C map depletion
+        working-directory: ${{ github.workspace }}
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+        run: node scripts/ci/check-repo-tenant-pat-map.mjs deploy/cloudflare/wrangler.jsonc
+
+      - name: Deploy (wrangler)
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+        run: |
+          set -euo pipefail
+          npx wrangler deploy
+
+  deploy-hosted:
+    needs: test-hosted
+    if: ${{ github.ref == 'refs/heads/main' && inputs.hosted_bootstrap }}
+    runs-on: ubuntu-latest
+    environment: corelink-runners
+    timeout-minutes: 60
+    defaults:
+      run:
+        working-directory: deploy/cloudflare
+    steps:
+      - name: Guard — hosted bootstrap must not bypass the busy-fleet gate
+        if: ${{ inputs.force }}
+        working-directory: ${{ github.workspace }}
+        run: |
+          echo "::error::hosted_bootstrap requires force=false; refusing a busy-fleet bypass."
+          exit 1
+
+      - name: Guard — require the CLOUDFLARE_API_TOKEN secret
+        working-directory: ${{ github.workspace }}
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+        run: |
+          set -euo pipefail
+          if [ -z "${CLOUDFLARE_API_TOKEN:-}" ]; then
+            echo "::error::Missing GH secret CLOUDFLARE_API_TOKEN — a Cloudflare API" \
+                 "token with Workers deploy scope is required to deploy the" \
+                 "spawn-Worker. Set it in repo Settings → Secrets and variables →" \
+                 "Actions, then re-run this workflow."
+            exit 1
+          fi
+
+      - uses: actions/checkout@9f698171ed81b15d1823a05fc7211befd50c8ae0 # v6.0.3 (Node 24)
+
+      - name: Set up Node 22 for hosted bootstrap
+        uses: actions/setup-node@2028fbc5c25fe9cf00d9f06a71cc4710d4507903 # v6.0.0 (Node 24)
+        with:
+          node-version: '22'
+
+      - name: Install deps (wrangler)
+        run: npm ci
+
+      - name: Gate — refuse to roll while the fleet is busy
+        working-directory: ${{ github.workspace }}
+        env:
+          FLEET_BUSY_READ_KEY: ${{ secrets.FLEET_BUSY_READ_KEY }}
+          POLL_INTERVAL_SECS: ${{ inputs.poll_interval_secs }}
+          DEADLINE_SECS: ${{ inputs.deadline_secs }}
+          FORCE: 'false'
           EXCLUDE_RUNNERS: ${{ runner.name }}
         run: bash scripts/ci/wait-for-idle-fleet.sh
 

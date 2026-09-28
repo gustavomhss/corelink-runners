@@ -158,6 +158,86 @@ def validate(documents: dict[str, str]) -> list[str]:
         if events != {"workflow_dispatch"}:
             errors.append(f"{name}: only workflow_dispatch is allowed (found {sorted(events)})")
         jobs = job_blocks(documents[name])
+        if name == "deploy-spawn-worker.yml":
+            expected_runners = {
+                "test-corelink": "corelink",
+                "test-hosted": "ubuntu-latest",
+                "deploy-corelink": "corelink",
+                "deploy-hosted": "ubuntu-latest",
+            }
+            if set(jobs) != set(expected_runners):
+                errors.append(
+                    f"{name}: jobs must remain limited to the mutually exclusive "
+                    "CoreLink and opt-in hosted bootstrap lanes"
+                )
+            for job, runner in expected_runners.items():
+                if job in jobs and [
+                    value.strip("'\"") for value in runner_labels(jobs[job])
+                ] != [runner]:
+                    errors.append(f"{name}: {job} must run on {runner}")
+
+            for input_name in ("hosted_bootstrap", "force"):
+                input_match = re.search(
+                    rf"(?ms)^      {input_name}:\n(?P<body>.*?)(?=^      [a-z_]+:|^permissions:)",
+                    documents[name],
+                )
+                if input_match is None:
+                    errors.append(f"{name}: {input_name} input is missing")
+                    continue
+                input_body = input_match.group("body")
+                for required in ("type: boolean", "default: false"):
+                    if required not in input_body:
+                        errors.append(
+                            f"{name}: {input_name} must declare {required}"
+                        )
+
+            for job, predicate in (
+                ("test-corelink", "if: ${{ !inputs.hosted_bootstrap }}"),
+                ("test-hosted", "if: ${{ inputs.hosted_bootstrap }}"),
+                (
+                    "deploy-corelink",
+                    "if: ${{ github.ref == 'refs/heads/main' && !inputs.hosted_bootstrap }}",
+                ),
+                (
+                    "deploy-hosted",
+                    "if: ${{ github.ref == 'refs/heads/main' && inputs.hosted_bootstrap }}",
+                ),
+            ):
+                if job in jobs and predicate not in jobs[job]:
+                    errors.append(f"{name}: {job} is missing its exact branch/mode guard")
+
+            for deploy_job, test_job in (
+                ("deploy-corelink", "test-corelink"),
+                ("deploy-hosted", "test-hosted"),
+            ):
+                block = jobs.get(deploy_job, "")
+                if f"needs: {test_job}" not in block:
+                    errors.append(f"{name}: {deploy_job} must depend on {test_job}")
+                if "environment: corelink-runners" not in block:
+                    errors.append(f"{name}: {deploy_job} must use corelink-runners environment")
+                for required in (
+                    "bash scripts/ci/wait-for-idle-fleet.sh",
+                    "node scripts/ci/check-repo-tenant-pat-map.mjs deploy/cloudflare/wrangler.jsonc",
+                    "npx wrangler deploy",
+                ):
+                    if required not in block:
+                        errors.append(f"{name}: {deploy_job} is missing {required}")
+            hosted_deploy = jobs.get("deploy-hosted", "")
+            for required in (
+                "if: ${{ inputs.force }}",
+                "FORCE: 'false'",
+                "hosted_bootstrap requires force=false",
+            ):
+                if required not in hosted_deploy:
+                    errors.append(f"{name}: hosted deploy is missing force safety guard {required}")
+
+            if not has_exact_read_only_permissions(documents[name]):
+                errors.append(f"{name}: permissions must be only workflow-level contents: read")
+            if not has_no_secret_path(jobs.get("test-hosted", "")):
+                errors.append(f"{name}: hosted test must not read secrets or environments")
+            if "FORCE: ${{ inputs.force }}" not in jobs.get("deploy-corelink", ""):
+                errors.append(f"{name}: CoreLink deploy must preserve the force input")
+            continue
         if name == "build-cf-container-images.yml":
             expected_runners = {
                 "validate-dispatch": "ubuntu-latest",
@@ -268,6 +348,40 @@ def negative_controls(documents: dict[str, str]) -> int:
          lambda s: s.replace("  gates:\n", "  gates:\n    environment: production\n", 1)),
         ("partial provider runner migration", "deploy-spawn-worker.yml",
          lambda s: re.sub(r"(?m)^    runs-on: corelink$", "    runs-on: ubuntu-latest", s, count=1)),
+        ("corelink bootstrap lane moved to hosted runner", "deploy-spawn-worker.yml",
+         lambda s: re.sub(
+             r"(?s)(  test-corelink:\n.*?^    runs-on:) corelink$",
+             r"\1 ubuntu-latest", s, count=1, flags=re.MULTILINE
+         )),
+        ("hosted bootstrap default enabled", "deploy-spawn-worker.yml",
+         lambda s: re.sub(
+             r"(?ms)(^      hosted_bootstrap:\n.*?^        default:) false$",
+             r"\1 true", s, count=1
+         )),
+        ("hosted bootstrap deploy branch guard removed", "deploy-spawn-worker.yml",
+         lambda s: s.replace(
+             "if: ${{ github.ref == 'refs/heads/main' && inputs.hosted_bootstrap }}",
+             "if: ${{ inputs.hosted_bootstrap }}", 1
+         )),
+        ("hosted bootstrap environment protection removed", "deploy-spawn-worker.yml",
+         lambda s: re.sub(
+             r"(?s)(  deploy-hosted:\n.*?^    )environment: corelink-runners\n",
+             r"\1steps:\n", s, count=1, flags=re.MULTILINE
+         )),
+        ("hosted bootstrap force bypass enabled", "deploy-spawn-worker.yml",
+         lambda s: s.replace("          FORCE: 'false'", "          FORCE: ${{ inputs.force }}", 1)),
+        ("hosted bootstrap force guard removed", "deploy-spawn-worker.yml",
+         lambda s: s.replace("        if: ${{ inputs.force }}\n", "        if: false\n", 1)),
+        ("hosted bootstrap input changed from boolean", "deploy-spawn-worker.yml",
+         lambda s: s.replace("        type: boolean\n        default: false\n\npermissions:",
+                             "        type: string\n        default: false\n\npermissions:", 1)),
+        ("non-hosted lane moved to arbitrary runner", "deploy-spawn-worker.yml",
+         lambda s: re.sub(
+             r"(?s)(  test-corelink:\n.*?^    runs-on:) corelink$",
+             r"\1 macos-latest", s, count=1, flags=re.MULTILINE
+         )),
+        ("unapproved provider job added", "deploy-spawn-worker.yml",
+         lambda s: s + "\n  rogue-hosted:\n    runs-on: ubuntu-latest\n"),
         ("DevEnv proof moved to self-hosted runner", "build-cf-container-images.yml",
          lambda s: re.sub(
              r"(?s)(  devenv-build-only:\n.*?^    runs-on:) ubuntu-latest$",
