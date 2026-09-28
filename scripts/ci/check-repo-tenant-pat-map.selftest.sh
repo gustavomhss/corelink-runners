@@ -61,7 +61,7 @@ def run_raw(raw):
         env = dict(os.environ, CLOUDFLARE_API_TOKEN="fixture", CLOUDFLARE_API_BASE=base)
         return subprocess.run(["node", str(guard), config.name], env=env, text=True, capture_output=True)
 
-ok_deploy = (200, {"success": True, "result": [{"id": "deployment", "versions": [{"version_id": "version", "percentage": 100}]}]})
+ok_deploy = (200, {"success": True, "result": {"deployments": [{"id": "deployment", "versions": [{"version_id": "version", "percentage": 100}]}]}})
 live_nonempty = (200, {"success": True, "result": {"resources": {"bindings": [{"name": "REPO_TENANT_PAT_MAP", "type": "plain_text", "text": '{"a/b":"SECRET"}'}]}}})
 live_empty = (200, {"success": True, "result": {"resources": {"bindings": []}}})
 
@@ -71,8 +71,11 @@ assert Handler.requests[-2:] == [("/accounts/acct/workers/scripts/corelink-spawn
 assert run("{}", ok_deploy, live_empty).returncode == 0
 assert run("{", ok_deploy, live_empty).returncode != 0
 assert run("{}", ok_deploy, (200, {"success": True, "result": {"resources": {"bindings": [{"name": "REPO_TENANT_PAT_MAP", "type": "secret_text", "text": "x"}]}}})).returncode != 0
-assert run("{}", (200, {"success": True, "result": []}), live_empty).returncode != 0
-assert run("{}", (200, {"success": True, "result": [{"versions": [{"version_id": "inactive", "percentage": 50}]}]}), live_empty).returncode != 0
+assert run("{}", (200, {"success": True, "result": {"deployments": []}}), live_empty).returncode != 0
+assert run("{}", (200, {"success": True, "result": {"unexpected": []}}), live_empty).returncode != 0
+assert run("{}", (200, {"success": False, "result": {"deployments": [{"versions": [{"version_id": "inactive", "percentage": 100}]}]}}), live_empty).returncode != 0
+assert run("{}", (200, {"success": True, "result": {"deployments": [{"versions": [{"version_id": "inactive", "percentage": 50}]}]}}), live_empty).returncode != 0
+assert run("{}", (200, {"success": True, "result": {"deployments": [{"versions": [{"version_id": "v1", "percentage": 50}, {"version_id": "v2", "percentage": 50}]}]}}), live_empty).returncode != 0
 assert run("{}", (403, {"success": False, "result": None}), live_empty).returncode != 0
 assert run("{}", ok_deploy, (401, {"success": False, "result": None})).returncode != 0
 assert run_raw('// "name":"decoy"\n{"name":"corelink-spawn-worker","account_id":"acct","vars":{"REPO_TENANT_PAT_MAP":"{}"}}').returncode == 0

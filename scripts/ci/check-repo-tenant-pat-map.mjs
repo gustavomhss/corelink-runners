@@ -55,8 +55,9 @@ async function main() {
     const candidate = mapCount(candidateText);
     const base = process.env.CLOUDFLARE_API_BASE || "https://api.cloudflare.com/client/v4";
     const deployments = await getJson(base, account, script, "deployments", token);
-    if (deployments?.success !== true || !Array.isArray(deployments.result) || !deployments.result.length) fail("no active deployment");
-    const active = deployments.result[0];
+    const activeDeployments = deployments?.result?.deployments;
+    if (deployments?.success !== true || !Array.isArray(activeDeployments) || !activeDeployments.length) fail("no active deployment");
+    const active = activeDeployments[0];
     if (!active || !Array.isArray(active.versions) || active.versions.length !== 1) fail("ambiguous active deployment");
     const activeVersion = active.versions[0];
     if (typeof activeVersion?.version_id !== "string" || activeVersion.percentage !== 100) fail("active deployment is not fully serving one version");
